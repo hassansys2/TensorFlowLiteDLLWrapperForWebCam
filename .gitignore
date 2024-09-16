@@ -30,3 +30,10 @@
 *.exe
 *.out
 *.app
+
+TensorFlowLiteDll\TensorFl*
+TensorFlowLiteDll\x64
+
+.vs
+/TensorFlowLiteDll/x64/Release
+/TensorFlowLiteDll/TensorFl.d9850245/x64/Release
