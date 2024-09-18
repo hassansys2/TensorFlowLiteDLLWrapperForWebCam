@@ -2,6 +2,7 @@
 
 using namespace cv;
 using namespace tflite;
+namespace fs = std::filesystem;
 
 VideoCapture cap;
 std::unique_ptr<tflite::Interpreter> interpreter;
@@ -10,21 +11,22 @@ tflite::ops::builtin::BuiltinOpResolver resolver;
 
 Mat background;
 Mat frame;
+
 Mat resized_frame;
-
-Mat smooth_mask_3ch;
 Mat segmentation_mask_resized;
+Mat avg_mask;
 Mat binary_mask;
+Mat smooth_mask;
+Mat smooth_mask_3ch;
+Mat frame_float, background_float;
+Mat foreground, background_overlay;
 
-Mat frame_float;
-Mat background_float;
-
-Mat foreground;
-Mat background_overlay;
-
+int current_background_index = 0;
 int mask_n = 5;
 double threshold_value = 0.6;
-std::deque<Mat> mask_buffer;
+
+std::vector<Mat> backgrounds;
+std::deque<cv::Mat>* mask_buffer = nullptr;
 
 extern "C" __declspec(dllexport) int Initialize() {
     cap.open(0);
@@ -50,58 +52,80 @@ extern "C" __declspec(dllexport) int Initialize() {
         return -4;
     }
 
-    background = imread("background_image.jpg");
-
-    if (background.empty()) {
-        return -7;
+    std::string background_folder = "backgrounds";
+    for (const auto& entry : fs::directory_iterator(background_folder)) {
+        Mat bg = imread(entry.path().string());
+        if (!bg.empty()) {
+            backgrounds.push_back(bg);
+        }
     }
 
-    cap >> frame;
-    if (frame.empty()) {
-        return -6;
+    if (backgrounds.empty()) {
+        std::cerr << "Error: No background images found in folder: " << background_folder << std::endl;
+        return -1;
     }
 
-    resize(background, background, frame.size());
+    mask_buffer = new std::deque<cv::Mat>();
+
+    if (!mask_buffer) {
+        std::cerr << "Masks_buffer Allocation Failed" << std::endl;
+        return -1;
+    }
 
     return 0;
 }
 
 extern "C" __declspec(dllexport) int CaptureFrameAndSegment(unsigned char* buffer, int width, int height, char key) {
     Mat output;
-    Mat avg_mask;
     
     cap >> frame;
     if (frame.empty()) {
-        return -6;
+        std::cerr << "Failed to capture frame from webcam." << std::endl;
+        return -1;
     }
 
+    if (current_background_index == -1) {
+        GaussianBlur(frame, background, Size(45, 45), 0);
+    }
+    else {
+        resize(backgrounds[current_background_index], background, frame.size());
+    }
+    
     resize(frame, resized_frame, Size(256, 144));
     resized_frame.convertTo(resized_frame, CV_32FC3, 1.0 / 255.0);
 
-    memcpy(interpreter->typed_input_tensor<float>(0), resized_frame.data,    resized_frame.total() * resized_frame.elemSize());
+    float* input_tensor = interpreter->typed_input_tensor<float>(0);
+    memcpy(input_tensor, resized_frame.data, resized_frame.total() * resized_frame.elemSize());
 
     if (interpreter->Invoke() != kTfLiteOk) {
-        return -7;
+        std::cerr << "Failed to invoke tflite interpreter." << std::endl;
+        return -2;
     }
 
-    resize(Mat(144, 256, CV_32FC1, (void*)interpreter->typed_output_tensor<float>(0)), segmentation_mask_resized, frame.size());
+    const float* output_tensor = interpreter->typed_output_tensor<float>(0);
+    Mat segmentation_mask(144, 256, CV_32FC1, (void*)output_tensor);
+
+    resize(segmentation_mask, segmentation_mask_resized, frame.size());
+
+    mask_buffer->push_back(segmentation_mask_resized);
+
+    if (mask_buffer->size() > mask_n) {
+        mask_buffer->pop_front();
+    }
+
     
-    mask_buffer.push_back(segmentation_mask_resized);
-
-    if (mask_buffer.size() > mask_n) {
-        mask_buffer.pop_front();
-    }
-
     avg_mask = Mat::zeros(segmentation_mask_resized.size(), CV_32FC1);
-    for (const Mat& m : mask_buffer) {
+    for (const Mat& m : *mask_buffer) {
         avg_mask += m;
     }
-    avg_mask /= static_cast<float>(mask_buffer.size());
     
-    threshold(avg_mask, binary_mask, threshold_value, 1, THRESH_BINARY);
-    GaussianBlur(binary_mask, binary_mask, Size(15, 15), 0);
+    avg_mask /= static_cast<float>(mask_buffer->size());
 
-    Mat mask_channels[] = { binary_mask, binary_mask, binary_mask };
+    threshold(avg_mask, binary_mask, threshold_value, 1, THRESH_BINARY);
+
+    GaussianBlur(binary_mask, smooth_mask, Size(15, 15), 0);
+
+    Mat mask_channels[] = { smooth_mask, smooth_mask, smooth_mask };
     merge(mask_channels, 3, smooth_mask_3ch);
     smooth_mask_3ch.convertTo(smooth_mask_3ch, CV_32FC3);
 
@@ -131,11 +155,11 @@ extern "C" __declspec(dllexport) int CaptureFrameAndSegment(unsigned char* buffe
         case 'd':
                 std::cout << "threshold value: " << (threshold_value = std::max((float)threshold_value - 0.05f, 0.0f)) << std::endl;
             break;
-        /*case 'b':
+        case 'b':
             current_background_index = (current_background_index + 1) % (backgrounds.size() + 1);
             if (current_background_index == backgrounds.size()) current_background_index = -1;
             std::cout << "Switched to next background: " << (current_background_index == -1 ? "Blurred Background" : std::to_string(current_background_index)) << std::endl;
-            break;*/
+            break;
     default:
         break;
     }
