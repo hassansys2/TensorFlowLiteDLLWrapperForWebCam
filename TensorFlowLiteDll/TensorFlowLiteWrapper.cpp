@@ -9,6 +9,8 @@ std::unique_ptr<tflite::Interpreter> interpreter;
 std::unique_ptr<tflite::FlatBufferModel> model;
 tflite::ops::builtin::BuiltinOpResolver resolver;
 
+Size frame_size;
+
 Mat background;
 Mat frame;
 
@@ -25,7 +27,7 @@ int current_background_index = 0;
 int mask_n = 5;
 double threshold_value = 0.6;
 
-std::vector<Mat> backgrounds;
+std::vector<cv::Mat>* backgrounds = nullptr;
 std::deque<cv::Mat>* mask_buffer = nullptr;
 
 extern "C" __declspec(dllexport) int Initialize() {
@@ -53,31 +55,44 @@ extern "C" __declspec(dllexport) int Initialize() {
     }
 
     std::string background_folder = "backgrounds";
-    for (const auto& entry : fs::directory_iterator(background_folder)) {
-        Mat bg = imread(entry.path().string());
-        if (!bg.empty()) {
-            backgrounds.push_back(bg);
-        }
-    }
-
-    if (backgrounds.empty()) {
-        std::cerr << "Error: No background images found in folder: " << background_folder << std::endl;
-        return -1;
-    }
-
-    mask_buffer = new std::deque<cv::Mat>();
-
+    backgrounds = new std::vector<cv::Mat>();
+    mask_buffer = new std::deque<cv::Mat>(); 
+    
     if (!mask_buffer) {
         std::cerr << "Masks_buffer Allocation Failed" << std::endl;
         return -1;
     }
 
+    if (!backgrounds) {
+        std::cerr << "backgrounds Allocation Failed" << std::endl;
+        return -1;
+    }
+
+    for (const auto& entry : fs::directory_iterator(background_folder)) {
+        Mat bg = imread(entry.path().string());
+        if (!bg.empty()) {
+            backgrounds->push_back(bg);
+        }
+    }
+
+    if (backgrounds->empty()) {
+        std::cerr << "Error: No background images found in folder: " << background_folder << std::endl;
+        return -1;
+    }
+
+    cap >> frame;
+    if (frame.empty()) {
+        std::cerr << "Failed to capture frame from webcam." << std::endl;
+        return -1;
+    }
+
+    frame_size = frame.size();
+
     return 0;
 }
 
 extern "C" __declspec(dllexport) int CaptureFrameAndSegment(unsigned char* buffer, int width, int height, char key) {
-    Mat output;
-    
+    Mat output_frame;
     cap >> frame;
     if (frame.empty()) {
         std::cerr << "Failed to capture frame from webcam." << std::endl;
@@ -88,7 +103,7 @@ extern "C" __declspec(dllexport) int CaptureFrameAndSegment(unsigned char* buffe
         GaussianBlur(frame, background, Size(45, 45), 0);
     }
     else {
-        resize(backgrounds[current_background_index], background, frame.size());
+        resize((*backgrounds)[current_background_index], background, frame_size);
     }
     
     resize(frame, resized_frame, Size(256, 144));
@@ -105,7 +120,7 @@ extern "C" __declspec(dllexport) int CaptureFrameAndSegment(unsigned char* buffe
     const float* output_tensor = interpreter->typed_output_tensor<float>(0);
     Mat segmentation_mask(144, 256, CV_32FC1, (void*)output_tensor);
 
-    resize(segmentation_mask, segmentation_mask_resized, frame.size());
+    resize(segmentation_mask, segmentation_mask_resized, frame_size);
 
     mask_buffer->push_back(segmentation_mask_resized);
 
@@ -135,11 +150,11 @@ extern "C" __declspec(dllexport) int CaptureFrameAndSegment(unsigned char* buffe
     multiply(frame_float, smooth_mask_3ch, foreground);
     multiply(background_float, Scalar(1, 1, 1) - smooth_mask_3ch, background_overlay);
 
-    add(foreground, background_overlay, output);
+    add(foreground, background_overlay, output_frame);
 
-    output.convertTo(output, CV_8UC3, 255.0);
+    output_frame.convertTo(output_frame, CV_8UC3, 255.0);
     
-    memcpy(buffer, output.data, width * height * sizeof(unsigned char));
+    memcpy(buffer, output_frame.data, width * height * sizeof(unsigned char));
 
     switch (key)
     {
@@ -156,8 +171,8 @@ extern "C" __declspec(dllexport) int CaptureFrameAndSegment(unsigned char* buffe
                 std::cout << "threshold value: " << (threshold_value = std::max((float)threshold_value - 0.05f, 0.0f)) << std::endl;
             break;
         case 'b':
-            current_background_index = (current_background_index + 1) % (backgrounds.size() + 1);
-            if (current_background_index == backgrounds.size()) current_background_index = -1;
+            current_background_index = (current_background_index + 1) % (backgrounds->size() + 1);
+            if (current_background_index == backgrounds->size()) current_background_index = -1;
             std::cout << "Switched to next background: " << (current_background_index == -1 ? "Blurred Background" : std::to_string(current_background_index)) << std::endl;
             break;
     default:
