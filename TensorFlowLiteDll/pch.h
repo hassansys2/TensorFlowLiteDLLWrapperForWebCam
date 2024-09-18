@@ -14,6 +14,10 @@
 #include <tensorflow/lite/model.h>
 #include <tensorflow/lite/optional_debug_tools.h>
 #include <tensorflow/lite/stderr_reporter.h>
+#include <deque>
+//#include <filesystem>
+//#include <vector>
 #include "framework.h"
+
 
 #endif //PCH_H
